@@ -2,6 +2,7 @@
 import logging
 import socket
 import random
+import asyncio
 
 from flux_led import BulbScanner, WifiLedBulb
 import voluptuous as vol
@@ -40,6 +41,7 @@ SUPPORT_FLUX_LED = SUPPORT_BRIGHTNESS | SUPPORT_EFFECT | SUPPORT_COLOR
 
 MODE_RGB = "rgb"
 MODE_RGBW = "rgbw"
+MODE_RGBCW = "rgbcw"
 
 # This mode enables white value to be controlled by brightness.
 # RGB value is ignored when this mode is specified.
@@ -125,7 +127,7 @@ DEVICE_SCHEMA = vol.Schema(
     {
         vol.Optional(CONF_NAME): cv.string,
         vol.Optional(ATTR_MODE, default=MODE_RGBW): vol.All(
-            cv.string, vol.In([MODE_RGBW, MODE_RGB, MODE_WHITE])
+            cv.string, vol.In([MODE_RGBW, MODE_RGBCW, MODE_RGB, MODE_WHITE])
         ),
         vol.Optional(CONF_PROTOCOL): vol.All(cv.string, vol.In(["ledenet"])),
         vol.Optional(CONF_CUSTOM_EFFECT): CUSTOM_EFFECT_SCHEMA,
@@ -230,6 +232,12 @@ class FluxLight(Light):
         if self._mode == MODE_WHITE:
             return self.white_value
 
+        # RBGCW mode returns 0 in brightness if white LEDs are in use (since brightness is for RBG mode only)
+        if self._mode == MODE_RGBCW:
+            rgbww = self.temperature_cw
+            if rgbww[0] or rgbww[1]:
+                return 0
+
         return self._bulb.brightness
 
     @property
@@ -243,14 +251,26 @@ class FluxLight(Light):
         if self._mode == MODE_RGBW:
             return SUPPORT_FLUX_LED | SUPPORT_WHITE_VALUE | SUPPORT_COLOR_TEMP
 
+        if self._mode == MODE_RGBCW:
+            return SUPPORT_FLUX_LED | SUPPORT_WHITE_VALUE | SUPPORT_COLOR_TEMP
+
         if self._mode == MODE_WHITE:
             return SUPPORT_BRIGHTNESS
 
         return SUPPORT_FLUX_LED
 
     @property
+    def temperature_cw(self):
+        rgbww = self._bulb.getRgbww()
+        return [rgbww[4], rgbww[3]]
+
+    @property
     def white_value(self):
         """Return the white value of this light between 0..255."""
+        if self._mode == MODE_RGBCW:
+            white_temp = self.temperature_cw
+            return white_temp[0] if white_temp[0] > white_temp[1] else white_temp[1]
+
         return self._bulb.getRgbw()[3]
 
     @property
@@ -294,12 +314,49 @@ class FluxLight(Light):
 
         # handle special modes
         if color_temp is not None:
+            if white is None:
+                white = self.white_value if self.white_value > 0 else 255
+            if self._mode == MODE_RGBCW:
+                # 153 - 500 color temp in mired
+
+                # map mired range from light input to kelvin range for bulb
+                miredMin = 500
+                miredMax = 153
+                kelvinMin = 2700
+                kelvinMax = 6500
+
+                # map mired to kelvin specifically for the setWhiteTemperature since it wants 2700~6500 kelvin and 
+                # we have 153~500 mired as an input which doesn't match up the way we want
+                color_temp_kelvin = (color_temp-miredMin)/(miredMax-miredMin)*(kelvinMax-kelvinMin)+kelvinMin
+
+                # self._bulb.setWhiteTemperature(color_temp_kelvin, white)
+                color_temp_kelvin = max(color_temp_kelvin-2700, 0)
+                warm = 255 * (1 - (color_temp_kelvin/3800))
+                cold = min(255 * color_temp_kelvin/3800, 255)
+                warm *= white/255 # white controls brightness
+                cold *= white/255
+
+                if warm > cold: # warm side will activate both cold and warm leds at same rate (much brighter warm mode)
+                    cold = warm
+
+                self._bulb.setRgbw(w=warm, w2=cold)
+                return
             if brightness is None:
                 brightness = self.brightness
             if color_temp > COLOR_TEMP_WARM_VS_COLD_WHITE_CUT_OFF:
                 self._bulb.setRgbw(w=brightness)
             else:
                 self._bulb.setRgbw(w2=brightness)
+            return
+
+        if white is not None and self._mode == MODE_RGBCW:
+            current_temp = self.temperature_cw
+            if not current_temp[0] and not current_temp[1]:
+                current_temp[0] = 255
+                current_temp[1] = 255
+            current_temp[0] *= white/255
+            current_temp[1] *= white/255
+            self._bulb.setRgbw(w=current_temp[1], w2=current_temp[0])
             return
 
         # Show warning if effect set with rgb, brightness, or white level
@@ -332,11 +389,14 @@ class FluxLight(Light):
 
         # Preserve current brightness on color/white level change
         if brightness is None:
-            brightness = self.brightness
+            brightness = self.brightness if self.brightness else 255
 
         # Preserve color on brightness/white level change
         if rgb is None:
             rgb = self._bulb.getRgb()
+            if self._mode == MODE_RGBW and rgb[0] == 0 and rgb[1] == 0 and rgb[2] == 0:
+                rgb = (255,255,255)
+
 
         if white is None and self._mode == MODE_RGBW:
             white = self.white_value
@@ -349,7 +409,7 @@ class FluxLight(Light):
         elif self._mode == MODE_RGBW:
             self._bulb.setRgbw(*tuple(rgb), w=white, brightness=brightness)
 
-        # handle RGB mode
+        # handle RGB or RGBCW mode
         else:
             self._bulb.setRgb(*tuple(rgb), brightness=brightness)
 
