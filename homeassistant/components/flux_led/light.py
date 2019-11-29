@@ -2,7 +2,6 @@
 import logging
 import socket
 import random
-import asyncio
 
 from flux_led import BulbScanner, WifiLedBulb
 import voluptuous as vol
