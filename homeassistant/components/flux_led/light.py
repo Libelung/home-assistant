@@ -29,6 +29,7 @@ import homeassistant.util.color as color_util
 _LOGGER = logging.getLogger(__name__)
 
 CONF_AUTOMATIC_ADD = "automatic_add"
+CONF_CUSTOM_EFFECT = "custom_effect"
 CONF_CUSTOM_EFFECTS = "custom_effects"
 CONF_COLORS = "colors"
 CONF_SPEED_PCT = "speed_pct"
@@ -130,6 +131,7 @@ DEVICE_SCHEMA = vol.Schema(
             cv.string, vol.In([MODE_RGBW, MODE_RGBWW, MODE_RGBCW, MODE_RGB, MODE_WHITE])
         ),
         vol.Optional(CONF_PROTOCOL): vol.All(cv.string, vol.In(["ledenet"])),
+        vol.Optional(CONF_CUSTOM_EFFECT): CUSTOM_EFFECT_SCHEMA,
         vol.Optional(CONF_CUSTOM_EFFECTS): {cv.string: CUSTOM_EFFECT_SCHEMA},
     }
 )
@@ -153,6 +155,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         device["ipaddr"] = ipaddr
         device[CONF_PROTOCOL] = device_config.get(CONF_PROTOCOL)
         device[ATTR_MODE] = device_config[ATTR_MODE]
+        device[CONF_CUSTOM_EFFECT] = device_config.get(CONF_CUSTOM_EFFECT)
         device[CONF_CUSTOM_EFFECTS] = device_config.get(CONF_CUSTOM_EFFECTS)
         light = FluxLight(device)
         lights.append(light)
@@ -172,6 +175,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         device["name"] = "{} {}".format(device["id"], ipaddr)
         device[ATTR_MODE] = None
         device[CONF_PROTOCOL] = None
+        device[CONF_CUSTOM_EFFECT] = None
         device[CONF_CUSTOM_EFFECTS] = None
         light = FluxLight(device)
         lights.append(light)
@@ -188,6 +192,7 @@ class FluxLight(Light):
         self._ipaddr = device["ipaddr"]
         self._protocol = device[CONF_PROTOCOL]
         self._mode = device[ATTR_MODE]
+        self._custom_effect = device[CONF_CUSTOM_EFFECT]
         self._custom_effects = device[CONF_CUSTOM_EFFECTS]
         self._selected_custom_effect = None
         self._bulb = None
@@ -342,11 +347,18 @@ class FluxLight(Light):
                 random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
             )
             return
-
         if effect:
+            if effect == CONF_CUSTOM_EFFECT and self._custom_effect is not None:
+                self._selected_custom_effect = None
+                self._bulb.setCustomPattern(
+                    self._custom_effect[CONF_COLORS],
+                    self._custom_effect[CONF_SPEED_PCT],
+                    self._custom_effect[CONF_TRANSITION],
+                )
+                return
             for custom_effect in self._custom_effects:
                 if custom_effect == effect:
-                    self._selected_custom_effect = custom_effect;
+                    self._selected_custom_effect = custom_effect
                     self._bulb.setCustomPattern(
                         self._custom_effects[custom_effect][CONF_COLORS],
                         self._custom_effects[custom_effect][CONF_SPEED_PCT],
@@ -354,7 +366,7 @@ class FluxLight(Light):
                     )
                     return
         # Reset selected effect
-        self._selected_custom_effect = None;
+        self._selected_custom_effect = None
 
         # Effect selection
         if effect in EFFECT_MAP:
