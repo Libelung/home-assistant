@@ -29,7 +29,7 @@ import homeassistant.util.color as color_util
 _LOGGER = logging.getLogger(__name__)
 
 CONF_AUTOMATIC_ADD = "automatic_add"
-CONF_CUSTOM_EFFECT = "custom_effect"
+CONF_CUSTOM_EFFECTS = "custom_effects"
 CONF_COLORS = "colors"
 CONF_SPEED_PCT = "speed_pct"
 CONF_TRANSITION = "transition"
@@ -129,7 +129,7 @@ DEVICE_SCHEMA = vol.Schema(
             cv.string, vol.In([MODE_RGBW, MODE_RGBCW, MODE_RGB, MODE_WHITE])
         ),
         vol.Optional(CONF_PROTOCOL): vol.All(cv.string, vol.In(["ledenet"])),
-        vol.Optional(CONF_CUSTOM_EFFECT): CUSTOM_EFFECT_SCHEMA,
+        vol.Optional(CONF_CUSTOM_EFFECTS): {cv.string: CUSTOM_EFFECT_SCHEMA},
     }
 )
 
@@ -152,7 +152,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         device["ipaddr"] = ipaddr
         device[CONF_PROTOCOL] = device_config.get(CONF_PROTOCOL)
         device[ATTR_MODE] = device_config[ATTR_MODE]
-        device[CONF_CUSTOM_EFFECT] = device_config.get(CONF_CUSTOM_EFFECT)
+        device[CONF_CUSTOM_EFFECTS] = device_config.get(CONF_CUSTOM_EFFECTS)
         light = FluxLight(device)
         lights.append(light)
         light_ips.append(ipaddr)
@@ -171,7 +171,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         device["name"] = "{} {}".format(device["id"], ipaddr)
         device[ATTR_MODE] = None
         device[CONF_PROTOCOL] = None
-        device[CONF_CUSTOM_EFFECT] = None
+        device[CONF_CUSTOM_EFFECTS] = None
         light = FluxLight(device)
         lights.append(light)
 
@@ -187,7 +187,8 @@ class FluxLight(Light):
         self._ipaddr = device["ipaddr"]
         self._protocol = device[CONF_PROTOCOL]
         self._mode = device[ATTR_MODE]
-        self._custom_effect = device[CONF_CUSTOM_EFFECT]
+        self._custom_effects = device[CONF_CUSTOM_EFFECTS]
+        self._selected_custom_effect = None
         self._bulb = None
         self._error_reported = False
 
@@ -275,8 +276,8 @@ class FluxLight(Light):
     @property
     def effect_list(self):
         """Return the list of supported effects."""
-        if self._custom_effect:
-            return FLUX_EFFECT_LIST + [EFFECT_CUSTOM]
+        if self._custom_effects is not None:
+            return FLUX_EFFECT_LIST + [EFFECT_CUSTOM] + [custom_effect for custom_effect in self._custom_effects]
 
         return FLUX_EFFECT_LIST
 
@@ -286,6 +287,8 @@ class FluxLight(Light):
         current_mode = self._bulb.raw_state[3]
 
         if current_mode == EFFECT_CUSTOM_CODE:
+            if self._selected_custom_effect is not None:
+                return self._selected_custom_effect
             return EFFECT_CUSTOM
 
         for effect, code in EFFECT_MAP.items():
@@ -310,6 +313,38 @@ class FluxLight(Light):
         effect = kwargs.get(ATTR_EFFECT)
         white = kwargs.get(ATTR_WHITE_VALUE)
         color_temp = kwargs.get(ATTR_COLOR_TEMP)
+
+        # Show warning if effect set with rgb, brightness, or white level
+        if effect and (brightness or white or rgb):
+            _LOGGER.warning(
+                "RGB, brightness and white level are ignored when"
+                " an effect is specified for a flux bulb"
+            )
+
+        # Random color effect
+        if effect == EFFECT_RANDOM:
+            self._bulb.setRgb(
+                random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
+            )
+            return
+
+        if effect:
+            for custom_effect in self._custom_effects:
+                if custom_effect == effect:
+                    self._selected_custom_effect = custom_effect;
+                    self._bulb.setCustomPattern(
+                        self._custom_effects[custom_effect][CONF_COLORS],
+                        self._custom_effects[custom_effect][CONF_SPEED_PCT],
+                        self._custom_effects[custom_effect][CONF_TRANSITION],
+                    )
+                    return
+        # Reset selected effect
+        self._selected_custom_effect = None;
+
+        # Effect selection
+        if effect in EFFECT_MAP:
+            self._bulb.setPresetPattern(EFFECT_MAP[effect], 50)
+            return
 
         # handle special modes
         if color_temp is not None:
@@ -356,34 +391,6 @@ class FluxLight(Light):
             current_temp[0] *= white/255
             current_temp[1] *= white/255
             self._bulb.setRgbw(w=current_temp[1], w2=current_temp[0])
-            return
-
-        # Show warning if effect set with rgb, brightness, or white level
-        if effect and (brightness or white or rgb):
-            _LOGGER.warning(
-                "RGB, brightness and white level are ignored when"
-                " an effect is specified for a flux bulb"
-            )
-
-        # Random color effect
-        if effect == EFFECT_RANDOM:
-            self._bulb.setRgb(
-                random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
-            )
-            return
-
-        if effect == EFFECT_CUSTOM:
-            if self._custom_effect:
-                self._bulb.setCustomPattern(
-                    self._custom_effect[CONF_COLORS],
-                    self._custom_effect[CONF_SPEED_PCT],
-                    self._custom_effect[CONF_TRANSITION],
-                )
-            return
-
-        # Effect selection
-        if effect in EFFECT_MAP:
-            self._bulb.setPresetPattern(EFFECT_MAP[effect], 50)
             return
 
         # Preserve current brightness on color/white level change
